@@ -43,6 +43,11 @@ spring:
     multipart:
       # 大小限制
       max-file-size: 10MB
+  rabbitmq:
+    host: 123.207.214.122
+    password: 123456
+    username: admin
+    port: 5672
 server:
   address: 0.0.0.0
   port: 8101

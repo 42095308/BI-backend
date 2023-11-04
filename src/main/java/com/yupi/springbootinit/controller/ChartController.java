@@ -4,6 +4,7 @@ import cn.hutool.core.io.FileUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.google.gson.Gson;
 import com.yupi.springbootinit.annotation.AuthCheck;
+import com.yupi.springbootinit.bizmq.MyMessageProducer;
 import com.yupi.springbootinit.common.BaseResponse;
 import com.yupi.springbootinit.common.DeleteRequest;
 import com.yupi.springbootinit.common.ErrorCode;
@@ -55,8 +56,8 @@ public class ChartController {
 
     @Resource
     private ThreadPoolExecutor threadPoolExecutor;
-
-    private final static Gson GSON = new Gson();
+    @Resource
+    private MyMessageProducer myMessageProducer;
 
     // region 增删改查
 
@@ -431,6 +432,92 @@ public class ChartController {
             }
         }, threadPoolExecutor);
 
+        BiResponse biResponse = new BiResponse();
+        biResponse.setChartId(chart.getId());
+        return ResultUtils.success(biResponse);
+    }
+
+
+    /**
+     * 图表异步生成(mq)
+     *
+     * @param multipartFile
+     * @param genChartByAiRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/gen/async/mq")
+    public BaseResponse<BiResponse> genChartByAiAsyncMq(@RequestPart("file") MultipartFile multipartFile,
+                                                      GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) {
+        String name = genChartByAiRequest.getName();
+        String goal = genChartByAiRequest.getGoal();
+        String chartType = genChartByAiRequest.getChartType();
+        // 校验
+        ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "目标为空");
+        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
+
+        // 文件大小校验
+        long size = multipartFile.getSize();
+        // 1M
+        final long maxSize = 1024 * 1024;
+        ThrowUtils.throwIf(size > maxSize, ErrorCode.PARAMS_ERROR, "文件过大");
+        // 文件类型校验
+        List<String> allowSuffixList = Arrays.asList("xls", "xlsx", "csv");
+        ThrowUtils.throwIf(!allowSuffixList.contains(FileUtil.getSuffix(multipartFile.getOriginalFilename())), ErrorCode.PARAMS_ERROR, "文件类型不支持");
+        // todo 文件内容校验
+
+        final long modelID = 1659171950288818178L;
+        // 用户必须登录才可以进行使用
+        User loginUser = userService.getLoginUser(request);
+        if (loginUser == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN_ERROR, "用户未登录");
+        }
+
+        // redisson进行限流
+        redisLimiterManager.doRateLimiter("genChartByAi" + loginUser.getId().toString());
+
+     /*
+    * 用户的输入(参考)
+      分析需求：
+      分析网站用户的增长情况
+      原始数据：
+      日期,用户数
+      1号,10
+      2号,20
+      3号,30
+    * */
+        // 构造用户输入
+        StringBuilder userInput = new StringBuilder();
+
+        userInput.append("用户需求：").append("\n");
+        String userGoal = goal;
+
+
+        if (StringUtils.isNotBlank(chartType)) {
+            // 拼接用户的图表类型
+            userGoal += "，请使用" + chartType;
+        }
+        userInput.append(userGoal).append("\n");
+        userInput.append("原始数据：").append("\n");
+
+        String excelToCsv = ExcelUtils.excelToCsv(multipartFile);
+        userInput.append(excelToCsv).append("\n");
+
+        // 先将提交的数据保存到数据库，然后异步生成图表
+        Chart chart = new Chart();
+        chart.setName(name);
+        chart.setGoal(goal);
+        chart.setChartData(excelToCsv);
+        chart.setChartType(chartType);
+        chart.setUserId(loginUser.getId());
+        // 设置装填为wait
+        chart.setStatus("wait");
+        boolean save = chartService.save(chart);
+        if (!save) {
+            ThrowUtils.throwIf(!save, ErrorCode.SYSTEM_ERROR, "图表保存失败");
+        }
+
+        myMessageProducer.sendMsg(String.valueOf(chart.getId()));
         BiResponse biResponse = new BiResponse();
         biResponse.setChartId(chart.getId());
         return ResultUtils.success(biResponse);
